@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: image-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python image_bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-image
+      - key: PYTHON_VERSION
+        value: 3.12.7
