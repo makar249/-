@@ -15,89 +15,68 @@ from telegram.ext import (
     filters,
 )
 
-# Налаштування беруться зі змінних середовища (Render → Environment)
-TOKEN = os.environ["BOT_TOKEN"]
+# ---------- Налаштування (беруться зі змінних середовища Render) ----------
+TOKEN = os.environ["BOT_TOKEN"]                         # токен Telegram-бота від @BotFather
+CF_ACCOUNT_ID = os.environ["CLOUDFLARE_ACCOUNT_ID"]     # Account ID з Cloudflare
+CF_API_TOKEN = os.environ["CLOUDFLARE_API_TOKEN"]       # API-токен Workers AI з Cloudflare
+MODEL = os.environ.get("CF_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+
 PORT = int(os.environ.get("PORT", "10000"))
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL")
 
-API_KEY = os.environ["GEMINI_API_KEY"]
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-image")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-
-# назва кнопки, співвідношення сторін
-FORMATS = {
-    "square": ("⬜ Квадрат", "1:1"),
-    "landscape": ("🖼 Горизонтальний", "16:9"),
-    "portrait": ("📱 Вертикальний", "9:16"),
-}
-ORDER = list(FORMATS)
+CF_URL = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{MODEL}"
 MAX_PROMPT = 500
 
 HELP = (
-    "Привіт! Я малюю картинки за описом (через Gemini).\n\n"
+    "Привіт! Я малюю картинки за описом.\n\n"
     "Просто напиши, що намалювати, наприклад:\n"
     "«кіт-астронавт на Марсі, цифровий арт»\n\n"
     "Або командою: /img опис\n"
-    "Чим детальніший опис, тим краще результат."
+    "Описи англійською зазвичай працюють краще."
 )
 
 
 def result_kb():
-    return Kb([[Btn("🔄 Ще варіант", callback_data="again"), Btn("📐 Формат", callback_data="fmt")]])
+    return Kb([[Btn("🔄 Ще варіант", callback_data="again")]])
 
 
-async def fetch_image(prompt: str, fmt: str):
+async def fetch_image(prompt: str):
     """Повертає (байти картинки, None) або (None, текст помилки для користувача)."""
-    ratio = FORMATS[fmt][1]
-    headers = {"x-goog-api-key": API_KEY, "Content-Type": "application/json"}
-
-    def body(with_ratio: bool):
-        cfg = {"responseModalities": ["TEXT", "IMAGE"]}
-        if with_ratio:
-            cfg["imageConfig"] = {"aspectRatio": ratio}
-        return {"contents": [{"parts": [{"text": f"Generate an image: {prompt}"}]}], "generationConfig": cfg}
-
-    with_ratio = True
+    headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     async with httpx.AsyncClient(timeout=120) as client:
-        for attempt in range(3):
+        for attempt in range(2):
+            payload = {"prompt": prompt, "steps": 4, "seed": random.randint(1, 10**9)}
             try:
-                r = await client.post(GEMINI_URL, headers=headers, json=body(with_ratio))
+                r = await client.post(CF_URL, headers=headers, json=payload)
             except httpx.HTTPError as e:
                 print("HTTP error:", repr(e), flush=True)
                 await asyncio.sleep(3)
                 continue
 
             if r.status_code == 200:
+                if r.headers.get("content-type", "").startswith("image"):
+                    return r.content, None
                 data = r.json()
-                cand = (data.get("candidates") or [{}])[0]
-                for part in cand.get("content", {}).get("parts", []):
-                    inline = part.get("inlineData") or part.get("inline_data")
-                    if inline and inline.get("data"):
-                        return base64.b64decode(inline["data"]), None
+                b64 = (data.get("result") or {}).get("image")
+                if b64:
+                    return base64.b64decode(b64), None
                 print("No image in response:", str(data)[:500], flush=True)
-                return None, "Gemini не повернув картинку (можливо, спрацював фільтр безпеки). Спробуй змінити опис."
+                return None, "Модель не повернула картинку. Спробуй змінити опис."
 
-            print("Gemini error", r.status_code, r.text[:500], flush=True)
-            if r.status_code == 400 and with_ratio:
-                with_ratio = False  # модель не прийняла формат, пробуємо без нього
-                continue
+            print("Cloudflare error", r.status_code, r.text[:500], flush=True)
+            if r.status_code in (401, 403):
+                return None, "Cloudflare не прийняв ключ. Перевір CLOUDFLARE_API_TOKEN і CLOUDFLARE_ACCOUNT_ID в Render."
             if r.status_code == 429:
-                if attempt < 2:
-                    await asyncio.sleep(6)
-                    continue
-                return None, "Ліміт запитів до Gemini вичерпано. Спробуй пізніше (або перевір, що для ключа ввімкнена генерація картинок)."
-            if r.status_code in (400, 401, 403, 404):
-                return None, "Gemini відхилив запит. Перевір GEMINI_API_KEY і GEMINI_MODEL в Render, дивись логи."
+                return None, "Вичерпано безкоштовний денний ліміт Cloudflare. Він оновлюється щодня о 00:00 UTC."
             await asyncio.sleep(3)
-    return None, "Gemini зараз не відповідає. Спробуй ще раз за хвилинку."
+    return None, "Не вийшло намалювати. Спробуй ще раз за хвилинку."
 
 
 async def generate(chat, ctx: ContextTypes.DEFAULT_TYPE, prompt: str):
-    fmt = ctx.user_data.get("fmt", "square")
     ctx.user_data["prompt"] = prompt
-    status = await chat.send_message("🎨 Малюю, це може зайняти до хвилини…")
+    status = await chat.send_message("🎨 Малюю, зачекай кілька секунд…")
     await chat.send_action(ChatAction.UPLOAD_PHOTO)
-    img, err = await fetch_image(prompt, fmt)
+    img, err = await fetch_image(prompt)
     try:
         await status.delete()
     except Exception:
@@ -133,12 +112,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not prompt:
         await query.answer("Напиши, що намалювати 🙂", show_alert=True)
         return
-    if query.data == "fmt":
-        cur = ctx.user_data.get("fmt", "square")
-        ctx.user_data["fmt"] = ORDER[(ORDER.index(cur) + 1) % len(ORDER)]
-        await query.answer(f"Формат: {FORMATS[ctx.user_data['fmt']][0]}")
-    else:
-        await query.answer()
+    await query.answer()
     await generate(query.message.chat, ctx, prompt)
 
 
