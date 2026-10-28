@@ -8,9 +8,9 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: GEMINI_API_KEY
+      - key: CLOUDFLARE_ACCOUNT_ID
         sync: false
-      - key: GEMINI_MODEL
-        value: gemini-2.5-flash-image
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
       - key: PYTHON_VERSION
         value: 3.12.7
